@@ -1,3 +1,8 @@
+For C++ run configure with
+```
+$ ./configure CC=g++ CFLAGS="-std=c++17"
+```
+
 # Memcached
 
 Memcached is a high performance multithreaded event-based key/value cache
