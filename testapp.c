@@ -213,7 +213,10 @@ static enum test_return cache_redzone_test(void)
 
     /* Ignore SIGABRT */
     struct sigaction old_action;
-    struct sigaction action = { .sa_handler = SIG_IGN, .sa_flags = 0};
+    struct sigaction action;
+    action.sa_handler = SIG_IGN;
+    action.sa_flags = 0;
+
     sigemptyset(&action.sa_mask);
     sigaction(SIGABRT, &action, &old_action);
 
@@ -494,9 +497,11 @@ static enum test_return test_issue_44(void) {
 static struct addrinfo *lookuphost(const char *hostname, in_port_t port)
 {
     struct addrinfo *ai = 0;
-    struct addrinfo hints = { .ai_family = AF_UNSPEC,
-                              .ai_protocol = IPPROTO_TCP,
-                              .ai_socktype = SOCK_STREAM };
+    struct addrinfo hints;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_socktype = SOCK_STREAM;
+
     char service[NI_MAXSERV];
     int error;
 
