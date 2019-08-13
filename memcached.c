@@ -3706,6 +3706,22 @@ static inline int make_ascii_get_suffix(char *suffix, item *it, bool return_cas,
     return (p - suffix) + 2;
 }
 
+/* client flags == 0 means use no storage for client flags */
+static inline int make_ascii_get_suffix(char *suffix, char* value, int nbytes) {
+    char *p = suffix;
+    *p = ' ';
+    p++;
+    p = itoa_u32(*((uint32_t *) value), p);
+
+    *p = ' ';
+    p = itoa_u32(nbytes-2, p+1);
+
+    *p = '\r';
+    *(p+1) = '\n';
+    *(p+2) = '\0';
+    return (p - suffix) + 2;
+}
+
 #define IT_REFCOUNT_LIMIT 60000
 static inline item* limited_get(char *key, size_t nkey, conn *c, uint32_t exptime, bool should_touch) {
     item *it;
@@ -3985,6 +4001,8 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
     bool fail_length = false;
     assert(c != NULL);
 
+    char* value;
+
     if (should_touch) {
         // For get and touch commands, use first token as exptime
         if (!safe_strtol(tokens[1].value, &exptime_int)) {
@@ -4006,15 +4024,16 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 goto stop;
             }
 
-            it = limited_get(key, nkey, c, exptime, should_touch);
+            rocksdb_readoptions_t *readoptions = rocksdb_readoptions_create();
+            size_t len;
+            char *err = NULL;
+            value = rocksdb_get(db, readoptions, key, strlen(key), &len, &err);
+            //assert(!err);
+
             if (settings.detail_enabled) {
-                stats_prefix_record_get(key, nkey, NULL != it);
+                stats_prefix_record_get(key, nkey, value != NULL);
             }
-            if (it) {
-                if (_ascii_get_expand_ilist(c, i) != 0) {
-                    item_remove(it);
-                    goto stop;
-                }
+            if (value != NULL) {
 
                 /*
                  * Construct the response. Each hit adds three elements to the
@@ -4025,49 +4044,31 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                  */
 
                 {
-                  MEMCACHED_COMMAND_GET(c->sfd, ITEM_key(it), it->nkey,
-                                        it->nbytes, ITEM_get_cas(it));
-                  int nbytes;
+                  MEMCACHED_COMMAND_GET(c->sfd, key, nkey, len, 0);
                   suffix = _ascii_get_suffix_buf(c, si);
                   if (suffix == NULL) {
-                      item_remove(it);
                       goto stop;
                   }
                   si++;
-                  nbytes = it->nbytes;
-                  int suffix_len = make_ascii_get_suffix(suffix, it, return_cas, nbytes);
+
+                  int payload_len = *(((char*)value) + sizeof(uint32_t) + sizeof(uint32_t));
+                  int suffix_len = make_ascii_get_suffix(suffix, value, payload_len);
                   if (add_iov(c, "VALUE ", 6) != 0 ||
-                      add_iov(c, ITEM_key(it), it->nkey) != 0 ||
+                      add_iov(c, key, nkey) != 0 ||
                       add_iov(c, suffix, suffix_len) != 0)
                       {
-                          item_remove(it);
                           goto stop;
                       }
-#ifdef EXTSTORE
-                  if (it->it_flags & ITEM_HDR) {
-                      if (_get_extstore(c, it, c->iovused-3, 4) != 0) {
-                          pthread_mutex_lock(&c->thread->stats.mutex);
-                          c->thread->stats.get_oom_extstore++;
-                          pthread_mutex_unlock(&c->thread->stats.mutex);
 
-                          item_remove(it);
-                          goto stop;
-                      }
-                  } else if ((it->it_flags & ITEM_CHUNKED) == 0) {
-#else
-                  if ((it->it_flags & ITEM_CHUNKED) == 0) {
-#endif
-                      add_iov(c, ITEM_data(it), it->nbytes);
-                  } else if (add_chunked_item_iovs(c, it, it->nbytes) != 0) {
-                      item_remove(it);
-                      goto stop;
-                  }
+                  char* payload = ((char*)(value) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t));
+
+                  add_iov(c, payload, payload_len);
                 }
 
                 if (settings.verbose > 1) {
                     int ii;
                     fprintf(stderr, ">%d sending key ", c->sfd);
-                    for (ii = 0; ii < it->nkey; ++ii) {
+                    for (ii = 0; ii < key; ++ii) {
                         fprintf(stderr, "%c", key[ii]);
                     }
                     fprintf(stderr, "\n");
@@ -4077,22 +4078,13 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 pthread_mutex_lock(&c->thread->stats.mutex);
                 if (should_touch) {
                     c->thread->stats.touch_cmds++;
-                    c->thread->stats.slab_stats[ITEM_clsid(it)].touch_hits++;
                 } else {
-                    c->thread->stats.lru_hits[it->slabs_clsid]++;
                     c->thread->stats.get_cmds++;
                 }
                 pthread_mutex_unlock(&c->thread->stats.mutex);
-#ifdef EXTSTORE
-                /* If ITEM_HDR, an io_wrap owns the reference. */
-                if ((it->it_flags & ITEM_HDR) == 0) {
-                    *(c->ilist + i) = it;
-                    i++;
-                }
-#else
-                *(c->ilist + i) = it;
+
                 i++;
-#endif
+
             } else {
                 pthread_mutex_lock(&c->thread->stats.mutex);
                 if (should_touch) {
@@ -4121,10 +4113,10 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
     } while(key_token->value != NULL);
 stop:
 
-    c->icurr = c->ilist;
-    c->ileft = i;
     c->suffixcurr = c->suffixlist;
     c->suffixleft = si;
+
+    free(value);
 
     if (settings.verbose > 1)
         fprintf(stderr, ">%d END\n", c->sfd);
