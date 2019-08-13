@@ -639,6 +639,13 @@ struct conn {
     char   *ritem;  /** when we read in an item's value, it goes here */
     int    rlbytes;
 
+    char   *key;
+    int    nkey;
+
+    unsigned int flags;
+    time_t exptime;
+    int vlen;
+
     /* data for the nread state */
 
     /**

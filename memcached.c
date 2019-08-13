@@ -120,7 +120,7 @@ static void conn_close(conn *c);
 static void conn_init(void);
 static bool update_event(conn *c, const int new_flags);
 static void complete_nread(conn *c);
-static void process_command(conn *c, char *command);
+static void process_command(conn *c, char *command, char* cont);
 static void write_and_free(conn *c, char *buf, int bytes);
 static int ensure_iov_space(conn *c);
 static int add_iov(conn *c, const void *buf, int len);
@@ -4149,15 +4149,8 @@ stop:
     }
 }
 
-static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, bool handle_cas) {
-    char *key;
-    size_t nkey;
-    unsigned int flags;
+static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, char* cont) {
     int32_t exptime_int = 0;
-    time_t exptime;
-    int vlen;
-    uint64_t req_cas_id=0;
-    item *it;
 
     assert(c != NULL);
 
@@ -4168,86 +4161,38 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         return;
     }
 
-    key = tokens[KEY_TOKEN].value;
-    nkey = tokens[KEY_TOKEN].length;
+    c->key = tokens[KEY_TOKEN].value;
+    c->nkey = tokens[KEY_TOKEN].length;
 
-    if (! (safe_strtoul(tokens[2].value, (uint32_t *)&flags)
+    if (! (safe_strtoul(tokens[2].value, (uint32_t *)&c->flags)
            && safe_strtol(tokens[3].value, &exptime_int)
-           && safe_strtol(tokens[4].value, (int32_t *)&vlen))) {
+           && safe_strtol(tokens[4].value, (int32_t *)&c->vlen))) {
         out_string(c, "CLIENT_ERROR bad command line format");
         return;
     }
 
     /* Ubuntu 8.04 breaks when I pass exptime to safe_strtol */
-    exptime = exptime_int;
+    c->exptime = exptime_int;
 
     /* Negative exptimes can underflow and end up immortal. realtime() will
        immediately expire values that are greater than REALTIME_MAXDELTA, but less
        than process_started, so lets aim for that. */
-    if (exptime < 0)
-        exptime = REALTIME_MAXDELTA + 1;
+    if (c->exptime < 0)
+        c->exptime = REALTIME_MAXDELTA + 1;
 
-    // does cas value exist?
-    if (handle_cas) {
-        if (!safe_strtoull(tokens[5].value, &req_cas_id)) {
-            out_string(c, "CLIENT_ERROR bad command line format");
-            return;
-        }
-    }
 
-    if (vlen < 0 || vlen > (INT_MAX - 2)) {
+    if (c->vlen < 0 || c->vlen > (INT_MAX - 2)) {
         out_string(c, "CLIENT_ERROR bad command line format");
         return;
     }
-    vlen += 2;
+    c->vlen += 2;
 
     if (settings.detail_enabled) {
-        stats_prefix_record_set(key, nkey);
+        stats_prefix_record_set(c->key, c->nkey);
     }
 
-    it = item_alloc(key, nkey, flags, realtime(exptime), vlen);
-
-    if (it == 0) {
-        enum store_item_type status;
-        if (! item_size_ok(nkey, flags, vlen)) {
-            out_string(c, "SERVER_ERROR object too large for cache");
-            status = TOO_LARGE;
-        } else {
-            out_of_memory(c, "SERVER_ERROR out of memory storing object");
-            status = NO_MEMORY;
-        }
-        LOGGER_LOG(c->thread->l, LOG_MUTATIONS, LOGGER_ITEM_STORE,
-                NULL, status, comm, key, nkey, 0, 0);
-        /* swallow the data line */
-        c->write_and_go = conn_swallow;
-        c->sbytes = vlen;
-
-        /* Avoid stale data persisting in cache because we failed alloc.
-         * Unacceptable for SET. Anywhere else too? */
-        if (comm == NREAD_SET) {
-            it = item_get(key, nkey, c, DONT_UPDATE);
-            if (it) {
-                item_unlink(it);
-                STORAGE_delete(c->thread->storage, it);
-                item_remove(it);
-            }
-        }
-
-        return;
-    }
-    ITEM_set_cas(it, req_cas_id);
-
-    c->item = it;
-#ifdef NEED_ALIGN
-    if (it->it_flags & ITEM_CHUNKED) {
-        c->ritem = ITEM_schunk(it);
-    } else {
-        c->ritem = ITEM_data(it);
-    }
-#else
-    c->ritem = ITEM_data(it);
-#endif
-    c->rlbytes = it->nbytes;
+    c->ritem = cont;
+    c->rlbytes = c->vlen;
     c->cmd = comm;
     conn_set_state(c, conn_nread);
 }
@@ -4767,7 +4712,7 @@ static void process_extstore_command(conn *c, token_t *tokens, const size_t ntok
     }
 }
 #endif
-static void process_command(conn *c, char *command) {
+static void process_command(conn *c, char *command, char *cont) {
 
     token_t tokens[MAX_TOKENS];
     size_t ntokens;
@@ -4807,11 +4752,11 @@ static void process_command(conn *c, char *command) {
                 (strcmp(tokens[COMMAND_TOKEN].value, "prepend") == 0 && (comm = NREAD_PREPEND)) ||
                 (strcmp(tokens[COMMAND_TOKEN].value, "append") == 0 && (comm = NREAD_APPEND)) )) {
 
-        process_update_command(c, tokens, ntokens, comm, false);
+        process_update_command(c, tokens, ntokens, comm, cont);
 
     } else if ((ntokens == 7 || ntokens == 8) && (strcmp(tokens[COMMAND_TOKEN].value, "cas") == 0 && (comm = NREAD_CAS))) {
 
-        process_update_command(c, tokens, ntokens, comm, true);
+        process_update_command(c, tokens, ntokens, comm, cont);
 
     } else if ((ntokens == 4 || ntokens == 5) && (strcmp(tokens[COMMAND_TOKEN].value, "incr") == 0)) {
 
@@ -5334,7 +5279,7 @@ static int try_read_command_ascii(conn *c) {
     assert(cont <= (c->rcurr + c->rbytes));
 
     c->last_cmd_time = current_time;
-    process_command(c, c->rcurr);
+    process_command(c, c->rcurr, cont);
 
     c->rbytes -= (cont - c->rcurr);
     c->rcurr = cont;
@@ -5846,7 +5791,10 @@ static void drive_machine(conn *c) {
 
         case conn_nread:
             if (c->rlbytes == 0) {
-                complete_nread(c);
+                //if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) {
+                //    out_string(c, "CLIENT_ERROR bad data chunk");
+
+                out_string(c, "STORED");
                 break;
             }
 
@@ -5859,39 +5807,89 @@ static void drive_machine(conn *c) {
                 break;
             }
 
-            if (!c->item || (((item *)c->item)->it_flags & ITEM_CHUNKED) == 0) {
-                /* first check if we have leftovers in the conn_read buffer */
-                if (c->rbytes > 0) {
-                    int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
-                    if (c->ritem != c->rcurr) {
-                        memmove(c->ritem, c->rcurr, tocopy);
-                    }
-                    c->ritem += tocopy;
-                    c->rlbytes -= tocopy;
-                    c->rcurr += tocopy;
-                    c->rbytes -= tocopy;
-                    if (c->rlbytes == 0) {
-                        break;
-                    }
+            if (c->rbytes > 0) {
+                int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
+                if (c->ritem != c->rcurr) {
+                    memmove(c->ritem, c->rcurr, tocopy);
+                }
+                c->ritem += tocopy;
+                c->rlbytes -= tocopy;
+                c->rcurr += tocopy;
+                c->rbytes -= tocopy;
+                if (c->rlbytes == 0) {
+                    // Insert into RocksDB
+
+                    rocksdb_writeoptions_t *writeoptions = rocksdb_writeoptions_create();
+                    rocksdb_writebatch_t *batch = rocksdb_writebatch_create();
+
+                    char* values[4];
+                    size_t values_sizes[4];
+
+                    values[0] = (char*)&c->flags;
+                    values_sizes[0] = sizeof(c->flags);
+
+                    rel_time_t exp = realtime(c->exptime);
+                    values[1] = (char*)&exp;
+                    values_sizes[1] = sizeof(exp);
+
+                    values[2] = (char*)&c->vlen;
+                    values_sizes[2] = sizeof(c->vlen);
+
+                    values[3] = c->item;
+                    values_sizes[3] = c->vlen;
+
+                    char *err = NULL;
+                    rocksdb_writebatch_putv(batch, 1, &c->key, (size_t*)&c->nkey, 4, values, values_sizes);
+                    rocksdb_write(db, writeoptions, batch, &err);
+
+                    rocksdb_writebatch_destroy(batch);
+                    rocksdb_writeoptions_destroy(writeoptions);
+
+                    break;
+                }
+            }
+
+            /*  now try reading from the socket */
+            res = c->read(c, c->ritem, c->rlbytes);
+            if (res > 0) {
+                pthread_mutex_lock(&c->thread->stats.mutex);
+                c->thread->stats.bytes_read += res;
+                pthread_mutex_unlock(&c->thread->stats.mutex);
+
+                if (c->rcurr == c->ritem) {
+                    c->rcurr += res;
                 }
 
-                /*  now try reading from the socket */
-                res = c->read(c, c->ritem, c->rlbytes);
-                if (res > 0) {
-                    pthread_mutex_lock(&c->thread->stats.mutex);
-                    c->thread->stats.bytes_read += res;
-                    pthread_mutex_unlock(&c->thread->stats.mutex);
-                    if (c->rcurr == c->ritem) {
-                        c->rcurr += res;
-                    }
-                    c->ritem += res;
-                    c->rlbytes -= res;
-                    break;
-                }
-            } else {
-                res = read_into_chunked_item(c);
-                if (res > 0)
-                    break;
+                rocksdb_writeoptions_t *writeoptions = rocksdb_writeoptions_create();
+                rocksdb_writebatch_t *batch = rocksdb_writebatch_create();
+
+                char* values[4];
+                size_t values_sizes[4];
+
+                values[0] = (char*)&c->flags;
+                values_sizes[0] = sizeof(c->flags);
+
+                rel_time_t exp = realtime(c->exptime);
+                values[1] = (char*)&exp;
+                values_sizes[1] = sizeof(exp);
+
+                values[2] = (char*)&c->vlen;
+                values_sizes[2] = sizeof(c->vlen);
+
+                values[3] = c->ritem;
+                values_sizes[3] = c->vlen;
+
+                char *err = NULL;
+                rocksdb_writebatch_putv(batch, 1, &c->key, (size_t*)&c->nkey, 4, values, values_sizes);
+                rocksdb_write(db, writeoptions, batch, &err);
+
+                rocksdb_writebatch_destroy(batch);
+                rocksdb_writeoptions_destroy(writeoptions);
+
+                c->ritem += res;
+                c->rlbytes -= res;
+
+                break;
             }
 
             if (res == 0) { /* end of stream */
