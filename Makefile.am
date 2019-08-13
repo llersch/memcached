@@ -92,6 +92,9 @@ endif
 
 memcached_debug_CFLAGS += -DMEMCACHED_DEBUG
 
+memcached_LDADD += librocksdb.a -ldl
+memcached_debug_LDADD += librocksdb.a -ldl
+
 memcached_dtrace.h: memcached_dtrace.d
 	${DTRACE} -h -s memcached_dtrace.d
 	sed -e 's,void \*,const void \*,g' memcached_dtrace.h | \

@@ -14,6 +14,7 @@
  *      Brad Fitzpatrick <brad@danga.com>
  */
 #include "memcached.h"
+#include "rocksdb/c.h"
 #ifdef EXTSTORE
 #include "storage.h"
 #endif
@@ -135,12 +136,21 @@ static inline int _get_extstore(conn *c, item *it, int iovst, int iovcnt);
 #endif
 static void conn_free(conn *c);
 
+/* RocksDB */
+static void rocksdb_init(void);
+static void rocksdb_end(void);
+
 /** exported globals **/
 struct stats stats;
 struct stats_state stats_state;
 struct settings settings;
 time_t process_started;     /* when the process was started */
 conn **conns;
+
+rocksdb_t *db;
+rocksdb_options_t *rocksdb_options;
+rocksdb_block_based_table_options_t *table_options;
+rocksdb_cache_t *rocksdb_cache;
 
 struct slab_rebalance slab_rebal;
 volatile int slab_rebalance_signal;
@@ -1190,6 +1200,45 @@ static int build_udp_headers(conn *c) {
     }
 
     return 0;
+}
+
+static void rocksdb_init(void) {
+    const char DBPath[] = "/tmp/rocksdb_simple_example";
+
+    rocksdb_options = rocksdb_options_create();
+    rocksdb_options_set_table_cache_numshardbits(rocksdb_options, 1);
+    rocksdb_options_set_create_if_missing(rocksdb_options, 1);
+    rocksdb_options_set_use_direct_reads(rocksdb_options, 1);
+    rocksdb_options_set_use_direct_io_for_flush_and_compaction(rocksdb_options, 1);
+    rocksdb_options_compaction_readahead_size(rocksdb_options, 2ULL << 20);
+    rocksdb_options_set_use_adaptive_mutex(rocksdb_options, 1);
+    rocksdb_options_set_allow_concurrent_memtable_write(rocksdb_options, 0);
+    rocksdb_options_set_enable_write_thread_adaptive_yield(rocksdb_options, 0);
+    rocksdb_options_set_level_compaction_dynamic_level_bytes(rocksdb_options, 1);
+    rocksdb_options_set_max_background_compactions(rocksdb_options, 4);
+    rocksdb_options_set_max_background_flushes(rocksdb_options, 2);
+    rocksdb_options_set_bytes_per_sync(rocksdb_options, 1ULL << 20);
+
+    table_options = rocksdb_block_based_options_create();
+    rocksdb_block_based_options_set_block_size(table_options, 16 * 1024);
+    rocksdb_block_based_options_set_cache_index_and_filter_blocks(table_options, 1);
+    rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache(table_options, 1);
+    rocksdb_cache = rocksdb_cache_create_lru(16ULL << 30);
+    rocksdb_block_based_options_set_block_cache(table_options, rocksdb_cache);
+
+    rocksdb_options_set_block_based_table_factory(rocksdb_options, table_options);
+
+    // open DB
+    char *err = NULL;
+    db = rocksdb_open(rocksdb_options, DBPath, &err);
+    assert(!err);
+}
+
+static void rocksdb_end(void) {
+    rocksdb_close(db);
+    rocksdb_cache_destroy(rocksdb_cache);
+    rocksdb_block_based_options_destroy(table_options);
+    rocksdb_options_destroy(rocksdb_options);
 }
 
 
@@ -8147,6 +8196,7 @@ int main (int argc, char **argv) {
     conn_init();
     slabs_init(settings.maxbytes, settings.factor, preallocate,
             use_slab_sizes ? slab_sizes : NULL);
+    rocksdb_init();
 #ifdef EXTSTORE
     if (storage_file) {
         enum extstore_res eres;
@@ -8316,6 +8366,8 @@ int main (int argc, char **argv) {
     }
 
     stop_assoc_maintenance_thread();
+
+    rocksdb_end();
 
     /* remove the PID file if we're a daemon */
     if (do_daemonize)
