@@ -8127,19 +8127,6 @@ int main (int argc, char **argv) {
         }
     }
 
-    /* lock paged memory if needed */
-    if (lock_memory) {
-#ifdef HAVE_MLOCKALL
-        int res = mlockall(MCL_CURRENT | MCL_FUTURE);
-        if (res != 0) {
-            fprintf(stderr, "warning: -k invalid, mlockall() failed: %s\n",
-                    strerror(errno));
-        }
-#else
-        fprintf(stderr, "warning: -k invalid, mlockall() not supported on this platform.  proceeding without.\n");
-#endif
-    }
-
     /* initialize main thread libevent instance */
 #if defined(LIBEVENT_VERSION_NUMBER) && LIBEVENT_VERSION_NUMBER >= 0x02000101
     /* If libevent version is larger/equal to 2.0.2-alpha, use newer version */
@@ -8180,12 +8167,12 @@ int main (int argc, char **argv) {
     }
 
     /* initialize other stuff */
-    logger_init();
+//    logger_init();
     stats_init();
     assoc_init(settings.hashpower_init);
     conn_init();
-    slabs_init(settings.maxbytes, settings.factor, preallocate,
-            use_slab_sizes ? slab_sizes : NULL);
+//    slabs_init(settings.maxbytes, settings.factor, preallocate,
+//            use_slab_sizes ? slab_sizes : NULL);
     rocksdb_init();
 #ifdef EXTSTORE
     if (storage_file) {
@@ -8229,38 +8216,38 @@ int main (int argc, char **argv) {
     init_lru_crawler(storage);
 #else
     memcached_thread_init(settings.num_threads, NULL);
-    init_lru_crawler(NULL);
+//    init_lru_crawler(NULL);
 #endif
 
-    if (start_assoc_maint && start_assoc_maintenance_thread() == -1) {
-        exit(EXIT_FAILURE);
-    }
-    if (start_lru_crawler && start_item_crawler_thread() != 0) {
-        fprintf(stderr, "Failed to enable LRU crawler thread\n");
-        exit(EXIT_FAILURE);
-    }
-#ifdef EXTSTORE
-    if (storage && start_storage_compact_thread(storage) != 0) {
-        fprintf(stderr, "Failed to start storage compaction thread\n");
-        exit(EXIT_FAILURE);
-    }
-    if (storage && start_storage_write_thread(storage) != 0) {
-        fprintf(stderr, "Failed to start storage writer thread\n");
-        exit(EXIT_FAILURE);
-    }
-
-    if (start_lru_maintainer && start_lru_maintainer_thread(storage) != 0) {
-#else
-    if (start_lru_maintainer && start_lru_maintainer_thread(NULL) != 0) {
-#endif
-        fprintf(stderr, "Failed to enable LRU maintainer thread\n");
-        return 1;
-    }
-
-    if (settings.slab_reassign &&
-        start_slab_maintenance_thread() == -1) {
-        exit(EXIT_FAILURE);
-    }
+//    if (start_assoc_maint && start_assoc_maintenance_thread() == -1) {
+//        exit(EXIT_FAILURE);
+//    }
+//    if (start_lru_crawler && start_item_crawler_thread() != 0) {
+//        fprintf(stderr, "Failed to enable LRU crawler thread\n");
+//        exit(EXIT_FAILURE);
+//    }
+//#ifdef EXTSTORE
+//    if (storage && start_storage_compact_thread(storage) != 0) {
+//        fprintf(stderr, "Failed to start storage compaction thread\n");
+//        exit(EXIT_FAILURE);
+//    }
+//    if (storage && start_storage_write_thread(storage) != 0) {
+//        fprintf(stderr, "Failed to start storage writer thread\n");
+//        exit(EXIT_FAILURE);
+//    }
+//
+//    if (start_lru_maintainer && start_lru_maintainer_thread(storage) != 0) {
+//#else
+//    if (start_lru_maintainer && start_lru_maintainer_thread(NULL) != 0) {
+//#endif
+//        fprintf(stderr, "Failed to enable LRU maintainer thread\n");
+//        return 1;
+//    }
+//
+//    if (settings.slab_reassign &&
+//        start_slab_maintenance_thread() == -1) {
+//        exit(EXIT_FAILURE);
+//    }
 
     if (settings.idle_timeout && start_conn_timeout_thread() == -1) {
         exit(EXIT_FAILURE);
@@ -8355,7 +8342,7 @@ int main (int argc, char **argv) {
         retval = EXIT_FAILURE;
     }
 
-    stop_assoc_maintenance_thread();
+//    stop_assoc_maintenance_thread();
 
     rocksdb_end();
 
