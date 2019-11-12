@@ -1231,7 +1231,10 @@ static void rocksdb_init(void) {
     // open DB
     char *err = NULL;
     db = rocksdb_open(rocksdb_options, DBPath, &err);
-    assert(!err);
+    if(err != NULL) {
+        fprintf(stderr, "Error opening RocksDB: %s.\n", err);
+        exit(EXIT_FAILURE);
+    }
 }
 
 static void rocksdb_end(void) {
@@ -4051,7 +4054,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                   }
                   si++;
 
-                  int payload_len = *(((char*)value) + sizeof(uint32_t) + sizeof(uint32_t));
+                  int payload_len = *(int*)(((char*)value) + sizeof(uint32_t) + sizeof(uint32_t));
                   int suffix_len = make_ascii_get_suffix(suffix, value, payload_len);
                   if (add_iov(c, "VALUE ", 6) != 0 ||
                       add_iov(c, key, nkey) != 0 ||
@@ -5804,10 +5807,12 @@ static void drive_machine(conn *c) {
                 if (c->ritem != c->rcurr) {
                     memmove(c->ritem, c->rcurr, tocopy);
                 }
+
                 c->ritem += tocopy;
                 c->rlbytes -= tocopy;
                 c->rcurr += tocopy;
                 c->rbytes -= tocopy;
+
                 if (c->rlbytes == 0) {
                     // Insert into RocksDB
 
@@ -5827,12 +5832,15 @@ static void drive_machine(conn *c) {
                     values[2] = (char*)&c->vlen;
                     values_sizes[2] = sizeof(c->vlen);
 
-                    values[3] = c->item;
+                    values[3] = c->ritem - tocopy;
                     values_sizes[3] = c->vlen;
 
                     char *err = NULL;
                     rocksdb_writebatch_putv(batch, 1, &c->key, (size_t*)&c->nkey, 4, values, values_sizes);
                     rocksdb_write(db, writeoptions, batch, &err);
+                    if(err != NULL) {
+                        fprintf(stderr, "Failed to insert: %s\n", err);
+                    }
 
                     rocksdb_writebatch_destroy(batch);
                     rocksdb_writeoptions_destroy(writeoptions);
@@ -5874,6 +5882,9 @@ static void drive_machine(conn *c) {
                 char *err = NULL;
                 rocksdb_writebatch_putv(batch, 1, &c->key, (size_t*)&c->nkey, 4, values, values_sizes);
                 rocksdb_write(db, writeoptions, batch, &err);
+                if(err != NULL) {
+                    fprintf(stderr, "Failed to insert: %s\n", err);
+                }
 
                 rocksdb_writebatch_destroy(batch);
                 rocksdb_writeoptions_destroy(writeoptions);
@@ -8169,7 +8180,7 @@ int main (int argc, char **argv) {
     /* initialize other stuff */
 //    logger_init();
     stats_init();
-    assoc_init(settings.hashpower_init);
+//    assoc_init(settings.hashpower_init);
     conn_init();
 //    slabs_init(settings.maxbytes, settings.factor, preallocate,
 //            use_slab_sizes ? slab_sizes : NULL);
